@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Auditoria de CT-e: DACTE x Apontamento</title>
+    
+    <!-- Bibliotecas para processar PDF e Excel no navegador -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+    
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f0f2f5;
+            color: #333;
+            margin: 0;
+            padding: 40px 20px;
+        }
+        .container {
+            max-width: 650px;
+            margin: 0 auto;
+            background: #ffffff;
+            padding: 30px 40px;
+            border-radius: 10px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        h2 {
+            color: #1a73e8;
+            margin-top: 0;
+            border-bottom: 2px solid #e8eaed;
+            padding-bottom: 15px;
+        }
+        .step {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: #5f6368;
+        }
+        input[type="file"] {
+            display: block;
+            width: 100%;
+            padding: 10px;
+            border: 1px dashed #bdc3c7;
+            border-radius: 6px;
+            background-color: #f8f9fa;
+        }
+        button {
+            width: 100%;
+            background-color: #1a73e8;
+            color: white;
+            border: none;
+            padding: 14px;
+            font-size: 16px;
+            font-weight: bold;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background 0.3s;
+            margin-top: 10px;
+        }
+        button:hover {
+            background-color: #1557b0;
+        }
+        #status {
+            margin-top: 25px;
+            padding: 15px;
+            border-radius: 6px;
+            background-color: #e6f4ea;
+            border-left: 5px solid #34a853;
+            display: none;
+            font-weight: 500;
+            white-space: pre-line;
+        }
+        .error {
+            background-color: #fce8e6 !important;
+            border-left-color: #ea4335 !important;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>Auditoria de CT-e (PDF x Excel)</h2>
+    
+    <div class="step">
+        <label>1. Selecione os arquivos DACTE (Múltiplos PDFs):</label>
+        <input type="file" id="dacteFiles" accept="application/pdf" multiple>
+    </div>
+    
+    <div class="step">
+        <label>2. Selecione a planilha de Apontamento (1 Excel .xlsx):</label>
+        <input type="file" id="excelFile" accept=".xlsx, .xls">
+    </div>
+    
+    <button onclick="processarArquivos()">Cruzar Dados e Gerar Relatório</button>
+    
+    <div id="status"></div>
+</div>
+
+<script>
+    // Configura o worker do PDF.js
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+
+    async function extractTextFromPDF(file) {
+        const arrayBuffer = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
+        let fullText = "";
+        
+        for (let i = 1; i <= pdf.numPages; i++) {
+            const page = await pdf.getPage(i);
+            const content = await page.getTextContent();
+            const pageText = content.items.map(item => item.str).join(" ");
+            fullText += pageText + "\n";
+        }
+        return fullText;
+    }
+
+    async function processarArquivos() {
+        const dacteFiles = document.getElementById('dacteFiles').files;
+        const excelInput = document.getElementById('excelFile').files;
+        const statusDiv = document.getElementById('status');
+        
+        if (dacteFiles.length === 0 || excelInput.length === 0) {
+            mostrarStatus('Por favor, selecione os PDFs e o arquivo Excel.', true);
+            return;
+        }
+
+        mostrarStatus('Lendo os arquivos PDF... Isso pode levar alguns segundos dependendo da quantidade.');
+
+        try {
+            // Passo 1: Extrair dados dos PDFs
+            let dadosDactes = [];
+            for (let i = 0; i < dacteFiles.length; i++) {
+                let file = dacteFiles[i];
+                let texto = await extractTextFromPDF(file);
+                
+                // Busca a chave de 44 dígitos
+                let chaveMatch = texto.match(/(?:\d\s*){44}/);
+                // Busca o Valor do Serviço
+                let valorMatch = texto.match(/VALOR\s+TOTAL\s+DO\s+SERVI[CÇ]O[\s\S]{0,30}?([\d\.,]+)/i);
+
+                let chaveLimpa = null;
+                let numeroCte = null;
+                if (chaveMatch) {
+                    chaveLimpa = chaveMatch[0].replace(/\s+/g, '');
+                    numeroCte = parseInt(chaveLimpa.substring(25, 34), 10);
+                }
+
+                let valorDacte = null;
+                if (valorMatch) {
+                    let valorStr = valorMatch[1].replace(/\./g, '').replace(',', '.');
+                    valorDacte = parseFloat(valorStr);
+                }
+
+                dadosDactes.push({
+                    'Arquivo DACTE': file.name,
+                    'Número CT-e': numeroCte,
+                    'Chave de Acesso SEFAZ': chaveLimpa,
+                    'Valor DACTE': valorDacte
+                });
+            }
+
+            mostrarStatus(`${dadosDactes.length} PDFs lidos. Cruzando com o Excel...`);
+
+            // Passo 2: Ler Excel
+            let excelFile = excelInput[0];
+            let arrayBuffer = await excelFile.arrayBuffer();
+            let workbook = XLSX.read(arrayBuffer, { type: 'array' });
+            let firstSheet = workbook.SheetNames[0];
+            let jsonData = XLSX.utils.sheet_to_json(workbook.Sheets[firstSheet]);
+
+            // Descobre as colunas automaticamente (ignorando maiúsculas/minúsculas e espaços)
+            let colunas = Object.keys(jsonData[0] || {});
+            let colNum = colunas.find(c => c.trim().toLowerCase() === 'número' || c.trim().toLowerCase() === 'numero') || 'Número';
+            let colValor = colunas.find(c => c.trim().toLowerCase() === 'valor') || 'Valor';
+
+            // Passo 3: Cruzamento e Auditoria
+            jsonData.forEach(row => {
+                let numExcel = parseInt(row[colNum], 10);
+                let correspondente = dadosDactes.find(d => d['Número CT-e'] === numExcel);
+
+                if (correspondente) {
+                    row['Chave de Acesso SEFAZ'] = correspondente['Chave de Acesso SEFAZ'];
+                    row['Valor DACTE'] = correspondente['Valor DACTE'];
+                } else {
+                    row['Chave de Acesso SEFAZ'] = 'NÃO ENCONTRADO';
+                    row['Valor DACTE'] = null;
+                }
+
+                // Lógica de Conferência de Valores
+                let valorApt = parseFloat(String(row[colValor] || '').replace(/\./g, '').replace(',', '.'));
+                let valorDct = parseFloat(row['Valor DACTE']);
+
+                if (row['Chave de Acesso SEFAZ'] === 'NÃO ENCONTRADO') {
+                    row['Status Conferência'] = 'FALTA DACTE';
+                } else if (!isNaN(valorApt) && !isNaN(valorDct)) {
+                    if (Math.abs(valorApt - valorDct) <= 0.01) {
+                        row['Status Conferência'] = 'OK';
+                    } else {
+                        row['Status Conferência'] = 'DIVERGENTE';
+                    }
+                } else {
+                    row['Status Conferência'] = 'ERRO FORMATO VALOR';
+                }
+            });
+
+            // Passo 4: Gerar o novo arquivo Excel
+            let newWs = XLSX.utils.json_to_sheet(jsonData);
+            let newWb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(newWb, newWs, "Auditoria_CTe");
+            XLSX.writeFile(newWb, "Auditoria_CTe_Apontamento.xlsx");
+
+            mostrarStatus('Concluído com Sucesso! \nO download da planilha auditada começou automaticamente.', false);
+
+        } catch (error) {
+            console.error(error);
+            mostrarStatus('Ocorreu um erro no processamento. Verifique se os arquivos estão corretos.', true);
+        }
+    }
+
+    function mostrarStatus(mensagem, erro = false) {
+        const statusDiv = document.getElementById('status');
+        statusDiv.style.display = 'block';
+        statusDiv.innerText = mensagem;
+        if (erro) {
+            statusDiv.classList.add('error');
+        } else {
+            statusDiv.classList.remove('error');
+        }
+    }
+</script>
+
+</body>
+</html>
